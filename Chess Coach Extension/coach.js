@@ -1,4 +1,4 @@
-/* Venice Chess Coach 2.4 - single file. No network, no external assets. */
+/* Venice Chess Coach 2.6.0 - local Stockfish engine. SPDX-License-Identifier: GPL-3.0-or-later */
 (function () {
   'use strict';
   if (window.__VCC && window.__VCC.started) return;
@@ -1008,7 +1008,54 @@
       };
     }
 
-    return { solve: solve };
+    function moveForUci(uci) {
+      const match = String(uci || '').match(/^([a-h][1-8])([a-h][1-8])([qrbn])?$/);
+      if (!match) return null;
+      const from = sqFromName(match[1]), to = sqFromName(match[2]);
+      const promo = match[3] ? FROMCH[match[3]] : 0;
+      return genLegal().find(m => m.from === from && m.to === to && m.promo === promo) || null;
+    }
+
+    function formatUci(fen, uci) {
+      setFen(fen);
+      const legal = genLegal();
+      const m = moveForUci(uci);
+      if (!m) return null;
+      return {
+        uci: sqName(m.from) + sqName(m.to) + (m.promo ? CH[m.promo] : ''),
+        from: m.from, to: m.to, promo: m.promo, san: toSAN(m), detail: describe(m),
+        sacrifice: isSacrifice(m), only: legal.length === 1
+      };
+    }
+
+    function formatPv(fen, moves) {
+      setFen(fen);
+      const san = [], undo = [];
+      for (const uci of moves || []) {
+        const m = moveForUci(uci);
+        if (!m) break;
+        san.push(toSAN(m));
+        undo.push(makeMove(m));
+      }
+      while (undo.length) unmakeMove(undo.pop());
+      return san;
+    }
+
+    function positionStatus(fen) {
+      setFen(fen);
+      return { legalCount: genLegal().length, check: inCheck(turn) };
+    }
+
+    function openingUci(fen, gamePly) {
+      setFen(fen);
+      const m = bookMove(Math.max(0, gamePly | 0));
+      return m ? sqName(m.from) + sqName(m.to) + (m.promo ? CH[m.promo] : '') : null;
+    }
+
+    return {
+      solve: solve, formatUci: formatUci, formatPv: formatPv,
+      positionStatus: positionStatus, openingUci: openingUci
+    };
   }
 
   /* ============================================================
@@ -2090,7 +2137,8 @@
     opening: 'none', calibrated: false, myColor: 'auto', depth: 0, perHost: {}
   };
 
-  let ui, overlay, worker = null, localEngine = null, busy = false, lastSig = '', pending = null;
+  let ui, overlay, worker = null, workerUrl = null, engineLoading = false, engineGeneration = 0;
+  let queuedThink = null, localEngine = null, busy = false, lastSig = '', pending = null;
   let myColor = null, tc = 'unknown', tcMax = 0, boardEl = null, oppScore = null, oppFen = null;
   let retryFlip = false, moveNum = 0, hidden = false;
   let ticking = false, pulseOn = false;
@@ -2146,21 +2194,65 @@
     if (ui) { ui.showPlayNow(false); ui.setArmed(false); ui.setHot(false); }
   }
 
+  function stopEngine() {
+    engineGeneration++;
+    engineLoading = false;
+    queuedThink = null;
+    if (worker) { try { worker.terminate(); } catch (e) {} }
+    worker = null; pulseOn = false;
+    if (workerUrl) { URL.revokeObjectURL(workerUrl); workerUrl = null; }
+  }
+
   function startEngine() {
+    if (worker || engineLoading) return;
+    engineLoading = true;
+    const generation = ++engineGeneration;
     try {
-      const src = 'var F = (' + ENGINE_FACTORY.toString() + '); var api = F();' +
-        'var pt = null;' +
-        'self.onmessage = function (e) {' +
-        '  var d = e.data || {};' +
-        '  if (d.type === "pulse-start") { if (!pt) pt = setInterval(function(){ self.postMessage({ type: "pulse" }); }, 420); return; }' +
-        '  if (d.type === "pulse-stop") { if (pt) { clearInterval(pt); pt = null; } return; }' +
-        '  try { self.postMessage({ ok: true, res: api.solve(d.fen, d.rating, d.sacBias, d.depth, d.tc, d.deep, d.clock, d.boost, d.punish, d.line, d.ply) }); }' +
-        '  catch (err) { self.postMessage({ ok: false, error: String(err && err.message || err) }); }' +
-        '};';
-      worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
-      worker.onmessage = onWorker;
-      worker.onerror = () => { worker = null; pulseOn = false; };
-    } catch (e) { worker = null; }
+      const jsUrl = chrome.runtime.getURL('stockfish-19-lite-single.js');
+      const readAsset = url => fetch(url).then(response => {
+        if (!response.ok) throw new Error('HTTP ' + response.status + ' loading ' + url);
+        return response.text();
+      });
+      Promise.all([readAsset(chrome.runtime.getURL('stockfish-worker.js')), readAsset(jsUrl)]).then(files => {
+        if (generation !== engineGeneration) return;
+        const engineSource = files[1].split('self.location.href').join(JSON.stringify(jsUrl))
+          .split('"stockfish.wasm"').join('"stockfish-19-lite-single.wasm"');
+        if (engineSource === files[1] || engineSource.indexOf('stockfish-19-lite-single.wasm') < 0) {
+          throw new Error('Could not configure Stockfish WebAssembly path.');
+        }
+        const workerSource = engineSource + '\n' + files[0];
+        const url = URL.createObjectURL(new Blob([workerSource], { type: 'application/javascript' }));
+        let created;
+        try { created = new Worker(url); }
+        catch (error) { URL.revokeObjectURL(url); throw error; }
+        workerUrl = url;
+        worker = created;
+        engineLoading = false;
+        created.onmessage = onWorker;
+        created.onerror = event => {
+          if (worker !== created) return;
+          stopEngine();
+          onWorker({ data: { ok: false, error: 'Stockfish worker failed to start: ' + (event.message || 'unknown error') } });
+        };
+        if (settings.auto) pulse(true);
+        if (queuedThink) {
+          const request = queuedThink;
+          queuedThink = null;
+          created.postMessage(request);
+        }
+      }).catch(error => {
+        if (generation !== engineGeneration) return;
+        engineLoading = false;
+        queuedThink = null;
+        if (worker) stopEngine();
+        if (pending) onWorker({ data: { ok: false, error: 'Could not load Stockfish: ' + String(error && error.message || error) } });
+      });
+    } catch (error) {
+      if (generation !== engineGeneration) return;
+      engineLoading = false;
+      queuedThink = null;
+      if (pending) onWorker({ data: { ok: false, error: 'Could not load Stockfish: ' + String(error && error.message || error) } });
+    }
   }
 
   function pulse(on) {
@@ -2172,21 +2264,20 @@
   function think(state, rating, sacBias, depth, tcm, deep, clock, boost, punish) {
     const line = activeLine();
     const ply = state.ply;
-    if (worker) {
-      try {
-        worker.postMessage({ fen: state.fen, rating: rating, sacBias: sacBias, depth: depth,
-                             tc: tcm, deep: !!deep, clock: clock || 0, boost: !!boost,
-                             punish: !!punish, line: line, ply: ply });
-        return;
-      } catch (e) { worker = null; pulseOn = false; }
+    const request = { type: 'analyze', fen: state.fen, rating: rating, sacBias: sacBias, depth: depth,
+                      tc: tcm, deep: !!deep, clock: clock || 0, boost: !!boost,
+                      punish: !!punish, line: line, ply: ply };
+    if (!worker) { queuedThink = request; startEngine(); return; }
+    try {
+      worker.postMessage(request);
+    } catch (err) {
+      stopEngine();
+      onWorker({ data: { ok: false, error: String(err && err.message || err) } });
     }
-    if (!localEngine) localEngine = ENGINE_FACTORY();
-    try { onWorker({ data: { ok: true, res: localEngine.solve(state.fen, rating, sacBias, depth, tcm, deep, clock, boost, punish, line, ply) } }); }
-    catch (err) { onWorker({ data: { ok: false, error: String(err && err.message || err) } }); }
   }
 
   function teardown() {
-    if (worker) { try { worker.terminate(); } catch (e) {} worker = null; pulseOn = false; }
+    stopEngine();
     const h = document.getElementById('vcc-host');
     if (h) h.remove();
     const o = document.getElementById('vcc-overlay');
@@ -2276,14 +2367,13 @@
   }
 
   function watchdog() {
-    if (!busy) return;
-    if (!pending || Date.now() - pending.at > 20000) {
-      busy = false;
-      pending = null;
-      lastSig = '';
-      ui.setStatus('Engine stalled, retrying\u2026', true);
-      if (!worker) startEngine();
-    }
+    if (!busy || !pending || Date.now() - pending.at <= 20000) return;
+    busy = false;
+    pending = null;
+    lastSig = '';
+    ui.setStatus('Stockfish stalled, restarting\u2026', true);
+    stopEngine();
+    startEngine();
   }
 
   function tick() {
@@ -2511,13 +2601,92 @@
     }, 60);
   }
 
+  function stockfishResult(analysis, state) {
+    if (!localEngine) localEngine = ENGINE_FACTORY();
+    const side = state.side;
+    const infos = (analysis.lines || []).filter(info => info && info.pv && info.pv.length);
+    const bestInfo = infos[0] || { scoreType: 'cp', score: 0, pv: [] };
+    const status = localEngine.positionStatus(state.fen);
+    if (!analysis.bestmove || analysis.bestmove === '0000' || analysis.bestmove === '(none)') {
+      return { empty: true, san: status.check ? 'checkmate' : 'stalemate' };
+    }
+
+    let uci = analysis.bestmove, opening = false, book = false;
+    const line = activeLine();
+    if (line && typeof line[state.ply] === 'string' &&
+        localEngine.formatUci(state.fen, line[state.ply])) {
+      uci = line[state.ply];
+      opening = true;
+    } else if (state.ply >= 0 && state.ply < 6 && Math.random() < (settings.autoPower ? 0.92 : 0.85)) {
+      const bookUci = localEngine.openingUci(state.fen, state.ply);
+      if (bookUci && localEngine.formatUci(state.fen, bookUci)) {
+        uci = bookUci;
+        book = true;
+      }
+    }
+
+    const scoreForSide = info => info.scoreType === 'mate'
+      ? Math.sign(info.score) * (29000 - Math.min(28000, Math.abs(info.score) * 2))
+      : info.score;
+    const candidates = infos.map(info => ({
+      info: info, score: scoreForSide(info), move: localEngine.formatUci(state.fen, info.pv[0])
+    })).filter(candidate => candidate.move);
+    let move = localEngine.formatUci(state.fen, uci);
+    if (!move) throw new Error('Stockfish returned an illegal move: ' + uci);
+    let chosenInfo = infos.find(info => info.pv[0] === uci) ||
+      infos.find(info => info.pv[0] === analysis.bestmove) || bestInfo;
+    if (settings.sac && !opening && !book && move.sacrifice) {
+      const topScore = candidates.length ? candidates[0].score : scoreForSide(bestInfo);
+      const actual = candidates.find(candidate => candidate.info.pv[0] === uci);
+      const acceptable = actual && topScore >= 120 && actual.score >= 120 && actual.score >= topScore - 20;
+      if (!acceptable) {
+        const safer = candidates.find(candidate => !candidate.move.sacrifice &&
+          topScore >= 120 && candidate.score >= 120 && candidate.score >= topScore - 20) ||
+          candidates.find(candidate => !candidate.move.sacrifice);
+        if (safer) {
+          uci = safer.info.pv[0];
+          move = safer.move;
+          chosenInfo = safer.info;
+          book = false;
+        }
+      }
+    }
+    const chosenScore = scoreForSide(chosenInfo);
+    const bestScore = scoreForSide(bestInfo);
+    const secondScore = infos.length > 1 ? scoreForSide(infos[1]) : -Infinity;
+    const whiteScore = score => side === 'w' ? score : -score;
+    const mateForWhite = info => info.scoreType === 'mate' ? info.score * (side === 'w' ? 1 : -1) : 0;
+    const lines = [];
+    for (const candidate of candidates) {
+      lines.push({ san: candidate.move.san, cp: whiteScore(candidate.score), d: candidate.move.detail });
+    }
+    const pv = localEngine.formatPv(state.fen, chosenInfo.pv);
+    const gap = infos.length > 1 ? Math.max(0, bestScore - secondScore) : 9999;
+    const forced = (bestInfo.scoreType === 'mate' && bestInfo.score > 0) ||
+      bestScore >= 420 || (gap >= 160 && bestScore >= 100);
+
+    return {
+      uci: move.uci, san: move.san, from: move.from, to: move.to, promo: move.promo,
+      scoreCp: whiteScore(chosenScore), mateIn: mateForWhite(chosenInfo),
+      bestMateIn: mateForWhite(bestInfo), loss: book || opening ? 0 : Math.max(0, bestScore - chosenScore),
+      gap: gap, only: move.only, book: book, depth: analysis.depth || chosenInfo.depth || 0,
+      opening: opening, forced: forced, detail: move.detail, sacrifice: move.sacrifice,
+      lines: lines, pv: pv
+    };
+  }
+
   function onWorker(e) {
     const data = (e && e.data) || {};
     if (data.type === 'pulse') { if (settings.auto) tick(); return; }
+    const engineFailure = !data.ok && /worker failed|WebAssembly failed|engine did not initialize/i.test(data.error || '');
+    if (engineFailure) stopEngine();
 
     const p = pending;
     busy = false;
-    if (!p) return;
+    if (!p) {
+      if (engineFailure && ui) ui.setStatus('Stockfish error: ' + data.error, true);
+      return;
+    }
 
     if (!data.ok) {
       if (!retryFlip && /Illegal/.test(data.error || '')) {
@@ -2531,14 +2700,20 @@
         return;
       }
       retryFlip = false;
-      ui.setStatus('Position unreadable, retrying\u2026', true);
+      ui.setStatus(data.error ? 'Stockfish error: ' + data.error : 'Position unreadable, retrying\u2026', true);
       lastSig = '';
       return;
     }
     retryFlip = false;
 
-    const res = data.res;
     const state = p.state;
+    let res;
+    try { res = data.res || stockfishResult(data.analysis, state); }
+    catch (err) {
+      ui.setStatus('Stockfish error: ' + String(err && err.message || err), true);
+      lastSig = '';
+      return;
+    }
     if (res.empty) {
       const over = res.san === 'draw' ? 'Draw by material.' : 'Game over (' + res.san + ').';
       ui.setStatus(over);

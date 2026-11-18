@@ -1,7 +1,7 @@
 # Venice Chess Coach
 
 A local Chrome extension that analyzes games on chess.com and lichess, suggests
-moves, and explains positions.
+moves, and explains positions using a locally bundled Stockfish 19 engine.
 
 ## Download and install
 
@@ -15,3 +15,7 @@ moves, and explains positions.
 plays every turn.
 
 The extension runs locally and does not send game data to a server.
+
+The extension's source is GPL-3.0-or-later. It includes Stockfish.js 19.0.1
+under GPL-3.0, along with its source archive, NNUE network, and notices in
+`Chess Coach Extension/vendor/stockfish-19/`.

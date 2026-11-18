@@ -1,6 +1,7 @@
 # Venice Chess Coach
 
-Rating-calibrated move arrow for chess.com and lichess. Runs entirely local.
+Rating-calibrated move arrow for chess.com and lichess, powered by a local
+Stockfish 19 engine. Game positions are not sent to a server.
 
 ## Install
 1. Download the [installable extension ZIP](https://github.com/heyitsmecruelty-macos/Chess-Cheats/releases/latest/download/Venice-Chess-Coach.zip)
@@ -20,9 +21,16 @@ Rating-calibrated move arrow for chess.com and lichess. Runs entirely local.
   **Whole game** plays every turn.
 
 ## Behaviour
-- Plays roughly 120 Elo above your setting, from a shortlist around that strength.
-- Blunder chance falls from ~30% at 800 to ~1% at 2400.
+- Targets roughly 120 Elo above your setting using Stockfish's strength-limit options.
+- Sacrifice suggestions are kept only when the line remains winning and is close
+  to Stockfish's best move.
 - Short opening book so first moves vary.
+
+## Engine license and source
+The bundled engine is Stockfish.js 19.0.1, lite single-threaded WebAssembly.
+The source archive, matching lite NNUE network, AUTHORS, and GPL-3.0 license
+are in `vendor/stockfish-19/`. The project is GPL-3.0-or-later; Stockfish is
+GPL-3.0. See the repository's `LICENSE` and the included `Copying.txt`.
 
 ## Known limits
 - Castling rights are inferred from piece placement; if a king wandered back to e1
