@@ -1,4 +1,4 @@
-/* Venice Chess Coach 2.6.0 - local Stockfish engine. SPDX-License-Identifier: GPL-3.0-or-later */
+/* Venice Chess Coach 2.6.1 - local Stockfish engine. SPDX-License-Identifier: GPL-3.0-or-later */
 (function () {
   'use strict';
   if (window.__VCC && window.__VCC.started) return;
@@ -2137,7 +2137,7 @@
     opening: 'none', calibrated: false, myColor: 'auto', depth: 0, perHost: {}
   };
 
-  let ui, overlay, worker = null, workerUrl = null, engineLoading = false, engineGeneration = 0;
+  let ui, overlay, worker = null, engineLoading = false, engineGeneration = 0;
   let queuedThink = null, localEngine = null, busy = false, lastSig = '', pending = null;
   let myColor = null, tc = 'unknown', tcMax = 0, boardEl = null, oppScore = null, oppFen = null;
   let retryFlip = false, moveNum = 0, hidden = false;
@@ -2200,7 +2200,6 @@
     queuedThink = null;
     if (worker) { try { worker.terminate(); } catch (e) {} }
     worker = null; pulseOn = false;
-    if (workerUrl) { URL.revokeObjectURL(workerUrl); workerUrl = null; }
   }
 
   function startEngine() {
@@ -2208,45 +2207,22 @@
     engineLoading = true;
     const generation = ++engineGeneration;
     try {
-      const jsUrl = chrome.runtime.getURL('stockfish-19-lite-single.js');
-      const readAsset = url => fetch(url).then(response => {
-        if (!response.ok) throw new Error('HTTP ' + response.status + ' loading ' + url);
-        return response.text();
-      });
-      Promise.all([readAsset(chrome.runtime.getURL('stockfish-worker.js')), readAsset(jsUrl)]).then(files => {
-        if (generation !== engineGeneration) return;
-        const engineSource = files[1].split('self.location.href').join(JSON.stringify(jsUrl))
-          .split('"stockfish.wasm"').join('"stockfish-19-lite-single.wasm"');
-        if (engineSource === files[1] || engineSource.indexOf('stockfish-19-lite-single.wasm') < 0) {
-          throw new Error('Could not configure Stockfish WebAssembly path.');
-        }
-        const workerSource = engineSource + '\n' + files[0];
-        const url = URL.createObjectURL(new Blob([workerSource], { type: 'application/javascript' }));
-        let created;
-        try { created = new Worker(url); }
-        catch (error) { URL.revokeObjectURL(url); throw error; }
-        workerUrl = url;
-        worker = created;
-        engineLoading = false;
-        created.onmessage = onWorker;
-        created.onerror = event => {
-          if (worker !== created) return;
-          stopEngine();
-          onWorker({ data: { ok: false, error: 'Stockfish worker failed to start: ' + (event.message || 'unknown error') } });
-        };
-        if (settings.auto) pulse(true);
-        if (queuedThink) {
-          const request = queuedThink;
-          queuedThink = null;
-          created.postMessage(request);
-        }
-      }).catch(error => {
-        if (generation !== engineGeneration) return;
-        engineLoading = false;
+      const created = new Worker(chrome.runtime.getURL('stockfish-worker.js'));
+      if (generation !== engineGeneration) { created.terminate(); return; }
+      worker = created;
+      engineLoading = false;
+      created.onmessage = onWorker;
+      created.onerror = event => {
+        if (worker !== created) return;
+        stopEngine();
+        onWorker({ data: { ok: false, error: 'Stockfish worker failed to start: ' + (event.message || 'unknown error') } });
+      };
+      if (settings.auto) pulse(true);
+      if (queuedThink) {
+        const request = queuedThink;
         queuedThink = null;
-        if (worker) stopEngine();
-        if (pending) onWorker({ data: { ok: false, error: 'Could not load Stockfish: ' + String(error && error.message || error) } });
-      });
+        created.postMessage(request);
+      }
     } catch (error) {
       if (generation !== engineGeneration) return;
       engineLoading = false;

@@ -1,4 +1,5 @@
 /* Venice Chess Coach Stockfish UCI bridge. SPDX-License-Identifier: GPL-3.0-or-later */
+importScripts('stockfish-19-lite-single.js');
 'use strict';
 
 const parentPostMessage = self.postMessage.bind(self);
