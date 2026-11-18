@@ -973,7 +973,7 @@
         depthUsed = out.depth;
         if (!out.results.length) throw new Error('No moves');
         forced = punishable(out.results);
-        chosen = pick(out.results, cfg, +sacBias || 0, forced);
+        chosen = boost ? out.results[0] : pick(out.results, cfg, +sacBias || 0, forced);
       }
 
       const results = out ? out.results : null;
@@ -1107,6 +1107,12 @@
   }
 
   const MOVE_LIST_SEL = ['.play-list', '.vertical-move-list', 'wc-move-list', '.move-list', '.tview2', 'rm6', '.l4x', '.moves'];
+  const INITIAL_PLACEMENT = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR';
+
+  function resolveBoardSide(forcedTurn, detectedTurn, placement) {
+    if (placement === INITIAL_PLACEMENT) return 'w';
+    return forcedTurn || detectedTurn || null;
+  }
 
   function moveListEl() {
     for (const sel of MOVE_LIST_SEL) { const el = document.querySelector(sel); if (el) return el; }
@@ -1219,11 +1225,12 @@
   }
 
   function track(flat, root, ply) {
-    if (!prevFlat || prevRoot !== root || (ply >= 0 && prevPly >= 0 && ply < prevPly)) {
+    if (!prevFlat || prevRoot !== root || (ply >= 0 && prevPly >= 0 && ply < prevPly) ||
+        (ply === 0 && prevPly !== 0)) {
       prevFlat = flat; prevRoot = root; prevPly = ply;
       rightsMask = inferRights(flat);
       halfmoveN = 0;
-      return { rights: '', ep: '', halfmove: 0 };
+      return { rights: rightsString(rightsMask), ep: '', halfmove: 0 };
     }
     const prev = prevFlat;
     prevFlat = flat; prevPly = ply;
@@ -1309,7 +1316,8 @@
       if (r > 0) placement += '/';
     }
 
-    const side = forcedTurn || detectTurn();
+    const positionPly = placement === INITIAL_PLACEMENT ? 0 : typeof ply === 'number' ? ply : -1;
+    const side = resolveBoardSide(forcedTurn, detectTurn(), placement);
     if (!side) return null;
 
     const at = (f, r) => grid[r] && grid[r][f];
@@ -1328,13 +1336,13 @@
       if (rights) rightsMask = inferRights(flat);
     }
 
-    const extra = track(flat, root, typeof ply === 'number' ? ply : -1);
+    const extra = track(flat, root, positionPly);
 
     return {
       fen: placement + ' ' + side + ' ' + (extra.rights || '-') + ' ' + (extra.ep || '-') + ' ' + extra.halfmove + ' 1',
-      side: side, flipped: flipped, root: root, ply: typeof ply === 'number' ? ply : -1,
+      side: side, flipped: flipped, root: root, ply: positionPly, placement: placement,
       rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-      signature: placement + side
+      signature: [placement, side, extra.rights || '-', extra.ep || '-', positionPly, flipped ? 'b' : 'w'].join(' ')
     };
   }
 
@@ -1650,6 +1658,7 @@
               <button data-amode="strong">Strong</button>
               <button class="amber" data-amode="all">Whole game</button>
             </div>
+            <div class="blurb">Strong plays book moves and clear tactics; Whole game plays every turn.</div>
           </div>
           <div class="row"><span>Take every win</span><button class="sw amber on" data-punish></button></div>
           <div class="row"><span>Playing as</span>
@@ -2087,7 +2096,7 @@
   let ticking = false, pulseOn = false;
 
   let aPhase = 'idle';
-  let autoDue = 0, playUntil = 0, playTries = 0, armedSig = '', playSig = '';
+  let autoDue = 0, playUntil = 0, playTries = 0, armedSig = '', playSig = '', playPosition = '';
   let queued = null;
 
   function activeLine() {
@@ -2216,6 +2225,22 @@
     scheduleTimer = setTimeout(tick, ms);
   }
 
+  function retryPlayback(signature) {
+    playTries++;
+    aPhase = 'idle';
+    if (playTries > 3) {
+      ui.setStatus('Could not play automatically.', true);
+      lastSig = '';
+      cancelAuto();
+      return false;
+    }
+    aPhase = 'armed';
+    autoDue = Date.now() + 420;
+    armedSig = signature;
+    ui.setStatus('Retrying\u2026');
+    return true;
+  }
+
   function resolveColor(state) {
     if (settings.myColor === 'w' || settings.myColor === 'b') return settings.myColor;
     if (myColor) return myColor;
@@ -2271,6 +2296,28 @@
       const turn = detectTurn();
       const state = readBoard(adapter, turn, ply);
       if (!state) {
+        if (aPhase === 'playing') {
+          if (Date.now() > playUntil) {
+            if (retryPlayback(playSig)) schedule(120);
+            else schedule(180);
+          } else {
+            ui.setStatus('Waiting for the move to register\u2026');
+            schedule(120);
+          }
+          return;
+        }
+        if (aPhase === 'armed') {
+          if (Date.now() > autoDue + 8000) {
+            cancelAuto();
+            lastSig = '';
+            ui.setStatus('Auto-play stopped: board unavailable.', true);
+            schedule(180);
+          } else {
+            ui.setStatus('Waiting for the board\u2026');
+            schedule(120);
+          }
+          return;
+        }
         ui.setStatus('No live board detected.');
         ui.setLive(false);
         overlay.clear();
@@ -2286,7 +2333,7 @@
       }
 
       if (aPhase === 'playing') {
-        if (state.signature !== playSig) {
+        if (state.placement !== playPosition) {
           lastSig = state.signature;
           playTries = 0;
           aPhase = 'idle';
@@ -2299,19 +2346,8 @@
           return;
         }
         if (Date.now() > playUntil) {
-          playTries++;
-          aPhase = 'idle';
-          if (playTries > 3) {
-            ui.setStatus('Could not play automatically.', true);
-            lastSig = '';
-            cancelAuto();
-            schedule(180);
-            return;
-          }
-          aPhase = 'armed';
-          autoDue = Date.now() + 420;
-          armedSig = state.signature;
-          ui.setStatus('Retrying\u2026');
+          if (retryPlayback(state.signature)) schedule(120);
+          else schedule(180);
         }
         return;
       }
@@ -2392,14 +2428,12 @@
   }
 
   function pickAutoDelay(opening) {
-    if (opening) return Math.round(600 + Math.random() * 1500);
-    if (Math.random() < 0.1) return 5600;
-    return Math.round(850 + Math.pow(Math.random(), 1.5) * 3300);
+    return Math.round((opening ? 700 : 900) + Math.random() * 400);
   }
 
   function shouldAuto(res, good, rating, isMine, mySign) {
     if (settings.autoMode === 'off' || !isMine) return false;
-    if (res.opening) return true;
+    if (res.opening || res.book) return true;
     if (settings.autoMode === 'all') return true;
     if (res.forced) return true;
     if (res.mateIn * mySign > 0) return true;
@@ -2411,10 +2445,11 @@
 
   function dispatch(el, type, x, y) {
     const down = type === 'pointerdown' || type === 'mousedown';
+    const held = down || type === 'pointermove' || type === 'mousemove';
     const Ctor = type.indexOf('pointer') === 0 ? PointerEvent : MouseEvent;
     el.dispatchEvent(new Ctor(type, {
       bubbles: true, cancelable: true, composed: true,
-      clientX: x, clientY: y, button: 0, buttons: down ? 1 : 0,
+      clientX: x, clientY: y, button: 0, buttons: held ? 1 : 0,
       pointerId: 1, pointerType: 'mouse', isPrimary: true, which: 1
     }));
   }
@@ -2440,7 +2475,7 @@
                   '[class*="promotion"] [class*="' + word + '"]', '.promotion-window .' + letter];
     for (const s of sels) {
       const el = document.querySelector(s);
-      if (el) { el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); el.click(); return; }
+      if (el) { el.click(); return; }
     }
   }
 
@@ -2448,26 +2483,32 @@
     if (!queued) { cancelAuto(); return; }
     const res = queued.res;
     const live = readBoard(adapter, state.side, state.ply);
-    if (!live || live.signature !== state.signature) { cancelAuto(); lastSig = ''; schedule(60); return; }
+    if (!live || live.signature !== state.signature || live.side !== queued.state.side ||
+        live.placement !== queued.state.placement) {
+      cancelAuto(); lastSig = ''; schedule(60); return;
+    }
 
     aPhase = 'playing';
     playSig = live.signature;
-    playUntil = Date.now() + 1900;
+    playPosition = live.placement;
+    playUntil = Date.now() + 3000;
     ui.setStatus('Playing ' + res.san + '\u2026');
 
     const a = elAt(live.rect, live.flipped, res.from & 7, res.from >> 4, live.root);
     const b = elAt(live.rect, live.flipped, res.to & 7, res.to >> 4, live.root);
     if (!a || !b) { aPhase = 'idle'; return; }
 
-    dispatch(a.el, 'pointerdown', a.x, a.y);
-    dispatch(a.el, 'mousedown', a.x, a.y);
+    const lichess = location.hostname.indexOf('lichess.org') >= 0;
+    const pointer = lichess ? playTries % 2 === 0 : playTries % 2 === 1;
+    const down = pointer ? 'pointerdown' : 'mousedown';
+    const move = pointer ? 'pointermove' : 'mousemove';
+    const up = pointer ? 'pointerup' : 'mouseup';
+    dispatch(a.el, down, a.x, a.y);
     setTimeout(() => {
-      dispatch(live.root, 'pointermove', b.x, b.y);
-      dispatch(b.el, 'pointermove', b.x, b.y);
-      dispatch(b.el, 'mouseup', b.x, b.y);
-      dispatch(b.el, 'pointerup', b.x, b.y);
+      dispatch(b.el, move, b.x, b.y);
+      dispatch(b.el, up, b.x, b.y);
       if (res.promo) setTimeout(() => pickPromo(res.promo), 140);
-    }, 40);
+    }, 60);
   }
 
   function onWorker(e) {
