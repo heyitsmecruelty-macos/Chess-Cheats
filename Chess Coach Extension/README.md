@@ -3,16 +3,18 @@
 Rating-calibrated move arrow for chess.com and lichess. Runs entirely local.
 
 ## Install
-1. Save the folder.
+1. Download and extract the ZIP from the
+   [latest GitHub release](https://github.com/heyitsmecruelty-macos/Chess-Cheats/releases/latest).
 2. Go to `chrome://extensions`, enable **Developer mode**.
-3. **Load unpacked** → pick the folder.
+3. **Load unpacked** → pick the extracted **Chess Coach Extension** folder.
 4. Open a game on chess.com or lichess.
 5. Set your rating on the panel and press **Start coaching**.
 
 ## Use
 - Arrow appears automatically on your turn (bottom side).
 - `Alt+A` forces a fresh analysis. `Alt+H` hides the panel.
-- **Sacrifice flair** biases it toward sound piece sacs.
+- **Sacrifice flair** only favors a piece sacrifice when the engine still sees at
+  least a 1.2-pawn advantage and the move is within 0.2 pawns of its top choice.
 - **Auto arrow** off = manual mode only.
 
 ## Behaviour

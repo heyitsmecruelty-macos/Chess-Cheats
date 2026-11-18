@@ -173,16 +173,20 @@
     }
 
     function see(m) {
-      if (!m.captured) return 0;
       const us = sideOf(m.piece);
-      const gain0 = VAL[Math.abs(m.captured)];
+      const gain0 = (m.captured ? VAL[Math.abs(m.captured)] : 0) +
+        (m.promo ? VAL[m.promo] - VAL[P] : 0);
       const from = m.from, to = m.to;
       const victim = board[to];
-      board[to] = m.piece;
+      const epCapSq = m.flags === 'ep' ? to - us * 16 : -1;
+      const epVictim = epCapSq >= 0 ? board[epCapSq] : 0;
+      if (epCapSq >= 0) board[epCapSq] = 0;
+      board[to] = m.promo ? us * m.promo : m.piece;
       board[from] = 0;
       const next = seeRec(to, -us);
       board[from] = m.piece;
       board[to] = victim;
+      if (epCapSq >= 0) board[epCapSq] = epVictim;
       return gain0 - next;
     }
 
@@ -338,7 +342,10 @@
     function mobilityOf(sq, t, us) {
       let n = 0;
       if (t === N) {
-        for (const d of KNIGHT_OFF) { const s = sq + d; if (isSq(s) && sideOf(board[s]) !== us) n++; }
+        for (const d of KNIGHT_OFF) {
+          const s = sq + d;
+          if (isSq(s) && (!board[s] || sideOf(board[s]) !== us)) n++;
+        }
         return n;
       }
       const offs = t === B ? BISHOP_OFF : t === R ? ROOK_OFF : KING_OFF;
@@ -531,26 +538,34 @@
     function quiesce(alpha, beta, ply, qd) {
       if ((nodes++ & 511) === 0 && performance.now() > deadline) aborted = true;
       if (aborted) return alpha;
-      const stand = evaluate();
-      if (stand >= beta) return beta;
-      if (stand > alpha) alpha = stand;
-      if (qd >= 8) return alpha;
+      const checked = inCheck(turn);
+      let stand = -Infinity;
+      const capped = checked && qd >= 16;
+      if (!checked) {
+        stand = evaluate();
+        if (stand >= beta) return beta;
+        if (stand > alpha) alpha = stand;
+        if (qd >= 8) return alpha;
+      }
 
-      const caps = orderMoves(genPseudo().filter(m => m.captured || m.promo), ply, null, -1);
-      for (const m of caps) {
-        if (!m.promo) {
+      const moves = orderMoves(genPseudo().filter(m => checked || m.captured || m.promo), ply, null, -1);
+      let legal = 0;
+      for (const m of moves) {
+        if (!checked && !m.promo) {
           const g = see(m);
           if (g < -70) continue;
           if (stand + g + 140 < alpha) continue;
         }
         const u = makeMove(m);
         if (inCheck(-turn)) { unmakeMove(u); continue; }
-        const s = -quiesce(-beta, -alpha, ply + 1, qd + 1);
+        legal++;
+        const s = capped ? -evaluate() : -quiesce(-beta, -alpha, ply + 1, qd + 1);
         unmakeMove(u);
         if (aborted) return alpha;
         if (s >= beta) return beta;
         if (s > alpha) alpha = s;
       }
+      if (checked && !legal) return -MATE + ply;
       return alpha;
     }
 
@@ -788,12 +803,8 @@
     }
 
     function isSacrifice(m) {
-      const us = sideOf(m.piece);
-      const pv = VAL[Math.abs(m.piece)], cv = m.captured ? VAL[Math.abs(m.captured)] : 0;
-      if (m.captured && pv > cv + 60) return true;
-      if (!m.captured && pv >= 300 && isAttacked(m.to, -us)) return true;
-      if (m.captured && pv >= 500 && cv <= 100) return true;
-      return false;
+      if (Math.abs(m.piece) === P || Math.abs(m.piece) === K || m.promo) return false;
+      return see(m) <= -100;
     }
 
     function punishable(results) {
@@ -821,7 +832,10 @@
       let cands = results.filter(r => r.score > best - cfg.window);
       if (!cands.length) cands = [results[0]];
       if (sacBias > 0) {
-        const sacs = cands.filter(r => isSacrifice(r.m) && r.score > best - 70);
+        cands = cands.filter(r => !isSacrifice(r.m) ||
+          (best >= 120 && r.score >= 120 && r.score >= best - 20));
+        if (!cands.length) cands = [results.find(r => !isSacrifice(r.m)) || results[0]];
+        const sacs = cands.filter(r => isSacrifice(r.m));
         if (sacs.length) cands = cands.concat(sacs, sacs);
       }
       if (Math.random() < cfg.blunder && cands.length > 2) {
@@ -1412,21 +1426,17 @@
      ============================================================ */
   const CSS = `
   :host{all:initial}
-  .wrap{position:fixed;top:16px;right:16px;width:306px;z-index:2147483400;
-  font-family:ui-sans-serif,-apple-system,"Segoe UI",Inter,sans-serif;color:#e9edf6;
-  background:linear-gradient(178deg,rgba(22,24,34,.975),rgba(11,12,17,.985));
-  border:1px solid rgba(255,255,255,.075);border-radius:20px;
-  box-shadow:0 30px 70px rgba(0,0,0,.66),0 0 0 1px rgba(255,255,255,.015) inset,0 1px 0 rgba(255,255,255,.06) inset;
-  backdrop-filter:blur(20px) saturate(1.2);overflow:hidden;user-select:none}
-  .wrap::before{content:"";position:absolute;top:0;left:0;right:0;height:1.5px;
-  background:linear-gradient(90deg,transparent,rgba(165,139,255,.6),rgba(33,212,168,.6),transparent)}
-  .bar{display:flex;align-items:center;gap:9px;padding:13px 15px 12px;cursor:grab}
-  .mark{width:18px;height:18px;border-radius:7px;flex:none;
-  background:conic-gradient(from 210deg,#7c5cff,#21d4a8,#7c5cff);
-  box-shadow:0 0 14px rgba(124,92,255,.55),0 1px 2px rgba(0,0,0,.55) inset}
-  .title{font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;flex:1;
-  background:linear-gradient(100deg,#d6ccff,#8ff0d3);-webkit-background-clip:text;background-clip:text;color:transparent}
-  .mini{all:unset;cursor:pointer;font-size:14px;line-height:1;padding:3px 6px;border-radius:7px;
+  .wrap{position:fixed;top:16px;right:16px;width:322px;z-index:2147483400;
+  font-family:ui-sans-serif,-apple-system,"Segoe UI",Inter,sans-serif;color:#e7eeec;
+  background:#101719;border:1px solid #293638;border-radius:15px;
+  box-shadow:0 18px 48px rgba(0,0,0,.5);overflow:hidden;user-select:none}
+  .wrap::before{content:"";position:absolute;top:0;left:16px;right:16px;height:2px;
+  background:#c9f17a;border-radius:0 0 2px 2px}
+  .bar{display:flex;align-items:center;gap:10px;padding:14px 15px 12px;cursor:grab;
+  border-bottom:1px solid rgba(255,255,255,.065)}
+  .mark{width:10px;height:10px;border-radius:3px;flex:none;background:#c9f17a}
+  .title{font-size:12px;font-weight:750;letter-spacing:.01em;flex:1;color:#f2f6f2}
+  .mini{all:unset;cursor:pointer;font-size:14px;line-height:1;padding:4px 7px;border-radius:7px;
   opacity:.45;color:#e9edf6;transition:.15s}
   .mini:hover{opacity:1;background:rgba(255,255,255,.08)}
   .body{padding:0 15px 15px;display:grid;gap:11px;max-height:calc(100vh - 36px);overflow-y:auto;
@@ -1434,37 +1444,34 @@
   .body.hide{display:none}
   .body::-webkit-scrollbar{width:5px}
   .body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}
-  .pills{display:flex;gap:5px;flex-wrap:wrap}
+  .pills{display:flex;gap:5px;flex-wrap:wrap;padding:2px 0}
   .pill{font-size:9px;padding:3.5px 8px;border-radius:7px;background:rgba(255,255,255,.05);
   border:1px solid rgba(255,255,255,.085);opacity:.68;font-weight:800;letter-spacing:.07em;text-transform:uppercase}
   .pill.warn{background:rgba(255,184,77,.13);border-color:rgba(255,184,77,.36);color:#ffcf8a;opacity:1}
   .pill.him{background:rgba(90,169,255,.13);border-color:rgba(90,169,255,.34);color:#9ecbff;opacity:1}
-  .pill.theory{background:rgba(139,122,224,.16);border-color:rgba(139,122,224,.42);color:#c8bcff;opacity:1}
-  .lbl{font-size:9px;letter-spacing:.15em;text-transform:uppercase;opacity:.38;font-weight:800}
+  .pill.theory{background:rgba(201,241,122,.1);border-color:rgba(201,241,122,.3);color:#d9f69d;opacity:1}
+  .lbl{font-size:9px;letter-spacing:.12em;text-transform:uppercase;opacity:.52;font-weight:800}
   .lbl b{font-weight:800;opacity:.8}
   .rrow{display:flex;align-items:flex-end;gap:9px;margin-top:-1px}
-  .rnum{font-size:32px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.025em;
-  background:linear-gradient(100deg,#c0adff,#21d4a8);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .rnum{font-size:31px;font-weight:760;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.035em;color:#d9f69d}
   .rtag{font-size:9.5px;opacity:.4;padding-bottom:3px;font-weight:700;letter-spacing:.04em}
-  input[type=range]{-webkit-appearance:none;width:100%;height:5px;border-radius:99px;outline:none;
-  background:linear-gradient(90deg,rgba(124,92,255,.9),rgba(33,212,168,.9));box-shadow:0 1px 3px rgba(0,0,0,.55) inset}
-  input[type=range].voice{background:linear-gradient(90deg,rgba(58,64,80,.95),rgba(90,169,255,.9))}
+  input[type=range]{-webkit-appearance:none;width:100%;height:4px;border-radius:99px;outline:none;
+  background:#354342;box-shadow:none}
+  input[type=range].voice{background:#354342}
   input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;
-  background:#fff;border:3px solid #131520;cursor:grab;
-  box-shadow:0 0 0 1px rgba(255,255,255,.42),0 3px 8px rgba(0,0,0,.75)}
+  background:#c9f17a;border:3px solid #101719;cursor:grab;box-shadow:0 0 0 1px #c9f17a}
   .seg{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px;border-radius:12px;
-  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.065)}
+  background:#151f21;border:1px solid #293638}
   .seg button{all:unset;cursor:pointer;text-align:center;font-size:10px;font-weight:800;padding:6.5px 2px;
   border-radius:8px;opacity:.5;transition:.15s;letter-spacing:.02em}
   .seg button:hover{opacity:.8}
-  .seg button.on{opacity:1;color:#0a0e12;background:linear-gradient(100deg,#7c5cff,#21d4a8);
-  box-shadow:0 2px 9px rgba(124,92,255,.4)}
-  .seg button.on.amber{background:linear-gradient(100deg,#ffb84d,#ff7a59);box-shadow:0 2px 9px rgba(255,122,89,.4)}
+  .seg button.on{opacity:1;color:#162018;background:#c9f17a;box-shadow:none}
+  .seg button.on.amber{background:#efbf69;color:#241d12;box-shadow:none}
   .chips{display:flex;gap:4px;flex-wrap:wrap}
   .chip{all:unset;cursor:pointer;font-size:10px;font-weight:800;padding:4px 8.5px;border-radius:8px;
   border:1px solid rgba(255,255,255,.095);opacity:.55;transition:.15s}
   .chip:hover{opacity:.85;border-color:rgba(255,255,255,.22)}
-  .chip.on{opacity:1;background:rgba(124,92,255,.22);border-color:rgba(165,139,255,.5);color:#dcd3ff}
+  .chip.on{opacity:1;background:rgba(201,241,122,.12);border-color:rgba(201,241,122,.45);color:#dcf6ad}
   .selwrap{position:relative}
   .selwrap::after{content:"";position:absolute;right:11px;top:50%;width:6px;height:6px;margin-top:-4px;
   border-right:1.6px solid rgba(255,255,255,.45);border-bottom:1.6px solid rgba(255,255,255,.45);
@@ -1474,18 +1481,20 @@
   background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);
   text-overflow:ellipsis;white-space:nowrap;overflow:hidden;transition:.15s}
   select:hover{background:rgba(255,255,255,.085);border-color:rgba(255,255,255,.16)}
-  select:focus{border-color:rgba(165,139,255,.55)}
-  select.on{background:rgba(139,122,224,.16);border-color:rgba(139,122,224,.45);color:#d9d0ff}
+  select:focus{border-color:rgba(201,241,122,.55)}
+  select.on{background:rgba(201,241,122,.1);border-color:rgba(201,241,122,.38);color:#dcf6ad}
   option{background:#15171f;color:#e9edf6;font-weight:600}
   optgroup{background:#0e1016;color:#8b8f9e;font-weight:800;font-size:10px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:1px 10px}
+  .group{display:grid;gap:9px;padding:11px;border:1px solid #263436;border-radius:12px;background:#141e20}
+  .group-title{font-size:9px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#92a4a0}
   .row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2.5px 0}
   .row span{font-size:11px;opacity:.68;letter-spacing:.01em}
   .sw{all:unset;cursor:pointer;width:30px;height:17px;border-radius:99px;background:rgba(255,255,255,.11);
   position:relative;transition:.16s;flex:none}
   .sw::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
   background:#fff;transition:transform .16s;box-shadow:0 1px 3px rgba(0,0,0,.55)}
-  .sw.on{background:linear-gradient(90deg,#7c5cff,#21d4a8)}
+  .sw.on{background:#c9f17a}
   .sw.on::after{transform:translateX(13px)}
   .sw.amber.on{background:linear-gradient(90deg,#ffb84d,#ff7a59)}
   .step{display:flex;align-items:center;gap:5px}
@@ -1493,13 +1502,12 @@
   font-size:12px;background:rgba(255,255,255,.075);opacity:.75}
   .sbtn:hover{background:rgba(255,255,255,.16);opacity:1}
   .sval{font-size:11px;font-weight:800;min-width:32px;text-align:center;opacity:.82;font-variant-numeric:tabular-nums}
-  .go{all:unset;cursor:pointer;text-align:center;padding:10.5px;border-radius:12px;font-size:12px;font-weight:800;
-  background:linear-gradient(100deg,#7c5cff,#21d4a8);color:#070a0d;letter-spacing:.02em;
-  box-shadow:0 7px 20px rgba(124,92,255,.3)}
-  .go:hover{filter:brightness(1.1)}
+  .go{all:unset;cursor:pointer;text-align:center;padding:11px;border-radius:10px;font-size:12px;font-weight:800;
+  background:#c9f17a;color:#182019;letter-spacing:.01em;box-shadow:none}
+  .go:hover{background:#d7f79a}
   .go:active{transform:translateY(1px)}
-  .go.alt{background:rgba(255,255,255,.085);color:#e9edf6;box-shadow:none;font-weight:700}
-  .go.alt:hover{background:rgba(255,255,255,.15);filter:none}
+  .go.alt{background:#243133;color:#e7eeec;box-shadow:none;font-weight:700}
+  .go.alt:hover{background:#2c3b3d;filter:none}
   .go.hide,.hide{display:none}
   .status{font-size:10.5px;opacity:.46;min-height:14px;line-height:1.45}
   .status.err{color:#ff9a9a;opacity:.95}
@@ -1508,15 +1516,14 @@
   .verdict.bad{background:linear-gradient(100deg,rgba(255,77,109,.17),rgba(255,122,89,.09));
   border:1px solid rgba(255,77,109,.4);color:#ffb8c5}
   .verdict.mild{background:rgba(255,184,77,.11);border:1px solid rgba(255,184,77,.32);color:#ffd79b}
-  .verdict.ok{background:rgba(33,212,168,.09);border:1px solid rgba(33,212,168,.27);color:#8ff0d3}
-  .verdict.win{background:linear-gradient(100deg,rgba(27,172,164,.22),rgba(33,212,168,.1));
-  border:1px solid rgba(27,172,164,.55);color:#8ff7e6;box-shadow:0 0 22px rgba(27,172,164,.16)}
-  .card{display:grid;gap:5px;padding:10px 12px;border-radius:13px;background:rgba(255,255,255,.042);
-  border:1px solid rgba(255,255,255,.065)}
+  .verdict.ok{background:rgba(201,241,122,.08);border:1px solid rgba(201,241,122,.22);color:#d9f69d}
+  .verdict.win{background:rgba(201,241,122,.12);
+  border:1px solid rgba(201,241,122,.36);color:#d9f69d}
+  .card{display:grid;gap:6px;padding:11px 12px;border-radius:12px;background:#172224;
+  border:1px solid #2a393a}
   .card.punish{background:linear-gradient(100deg,rgba(255,184,77,.12),rgba(255,122,89,.05));
   border-color:rgba(255,184,77,.35)}
-  .card.theory{background:linear-gradient(100deg,rgba(139,122,224,.13),rgba(124,92,255,.05));
-  border-color:rgba(139,122,224,.35)}
+  .card.theory{background:rgba(201,241,122,.06);border-color:rgba(201,241,122,.28)}
   .mvrow{display:flex;align-items:center;gap:8px}
   .mv{font-size:20px;font-weight:800;letter-spacing:.01em}
   .badge{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;
@@ -1525,33 +1532,32 @@
   letter-spacing:.07em;background:rgba(255,255,255,.075);border:1px solid rgba(255,255,255,.11);opacity:.72}
   .meta{font-size:10px;opacity:.42;font-variant-numeric:tabular-nums}
   .edge{height:3px;border-radius:99px;background:rgba(255,255,255,.09);overflow:hidden;margin-top:2px}
-  .edge i{display:block;height:100%;border-radius:99px;transition:width .3s,margin .3s;
-  background:linear-gradient(90deg,#21d4a8,#7c5cff)}
+  .edge i{display:block;height:100%;border-radius:99px;transition:width .3s,margin .3s;background:#c9f17a}
   .edge i.losing{background:linear-gradient(90deg,#ff4d6d,#ff9f43)}
   .sac{color:#ffb84d;font-weight:800;font-size:9px;text-transform:uppercase;letter-spacing:.06em}
-  .think{display:grid;gap:5px;padding:10px 12px;border-radius:13px;
-  background:rgba(90,169,255,.055);border:1px solid rgba(90,169,255,.15)}
+  .think{display:grid;gap:6px;padding:11px 12px;border-radius:12px;
+  background:#141f22;border:1px solid #29383a}
   .think .why{font-size:11px;line-height:1.55;opacity:.86}
   .pv{font-size:10px;opacity:.46;font-variant-numeric:tabular-nums;line-height:1.55;word-break:break-word}
   .line{display:flex;justify-content:space-between;gap:8px;font-size:10px;font-variant-numeric:tabular-nums;
   opacity:.46;padding:2.5px 5px;border-radius:6px}
   .line.best{opacity:1;background:rgba(255,255,255,.055);font-weight:800}
   .mate{font-size:11px;font-weight:800;padding:9px 12px;border-radius:12px;
-  background:linear-gradient(100deg,rgba(27,172,164,.24),rgba(33,212,168,.09));
-  border:1px solid rgba(27,172,164,.5);color:#7ff0e4;box-shadow:0 0 22px rgba(27,172,164,.18)}
+  background:rgba(201,241,122,.12);
+  border:1px solid rgba(201,241,122,.36);color:#d9f69d}
   .log{display:grid;gap:1px;max-height:124px;overflow-y:auto;scrollbar-width:thin}
   .logrow{display:flex;align-items:center;gap:6px;font-size:10.5px;opacity:.76;font-variant-numeric:tabular-nums;padding:1.5px 2px}
   .logrow .n{opacity:.32;min-width:18px}
   .logrow .s{font-weight:800}
   .logrow .t{margin-left:auto;opacity:.36;font-size:9px}
-  .sep{height:1px;background:rgba(255,255,255,.055);margin:1px 0}
-  .setup{display:grid;gap:11px;padding-top:2px}
-  .blurb{font-size:11px;opacity:.5;line-height:1.55}
-  .bgdot{width:6px;height:6px;border-radius:50%;background:#21d4a8;flex:none;
-  box-shadow:0 0 8px #21d4a8;transition:.2s}
-  .bgdot.off{background:#575b6a;box-shadow:none}
-  .bgdot.armed{background:#ffb84d;box-shadow:0 0 10px #ffb84d;animation:pulse 1.05s ease-in-out infinite}
-  .bgdot.hot{background:#ff4d6d;box-shadow:0 0 10px #ff4d6d}
+  .sep{height:1px;background:rgba(255,255,255,.08);margin:1px 0}
+  .setup{display:grid;gap:10px;padding-top:2px}
+  .blurb{font-size:11px;opacity:.62;line-height:1.55}
+  .eyebrow{font-size:9px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#c9f17a}
+  .bgdot{width:7px;height:7px;border-radius:50%;background:#c9f17a;flex:none;transition:.2s}
+  .bgdot.off{background:#596564}
+  .bgdot.armed{background:#efbf69;animation:pulse 1.05s ease-in-out infinite}
+  .bgdot.hot{background:#ff7880}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   `;
 
@@ -1601,7 +1607,8 @@
     </div>
     <div class="body" data-body>
       <div class="setup" data-setup>
-        <div class="blurb">Pick how strong the moves should be. Every move on both sides is rated, explained and drawn on the board.</div>
+        <div class="eyebrow">YOUR PERSONAL CHESS COACH</div>
+        <div class="blurb">Choose a playing strength to get move suggestions, explanations, and feedback as you play.</div>
         <div>
           <div class="lbl">Move strength</div>
           <div class="rrow"><div class="rnum" data-rnum>1200</div><div class="rtag" data-rtag>club</div></div>
@@ -1611,62 +1618,68 @@
       </div>
       <div class="setup hide" data-main>
         <div class="pills"><span class="pill" data-tc>Format ?</span><span class="pill" data-side>Turn ?</span><span class="pill theory hide" data-theory></span></div>
-        <div>
-          <div class="lbl">Move strength</div>
-          <div class="rrow"><div class="rnum" data-rnum2>1200</div><div class="rtag" data-rtag2>club</div></div>
-          <input type="range" min="150" max="3000" step="25" value="1200" data-range2>
-        </div>
-        <div class="chips">
-          <button class="chip" data-preset="300">300</button>
-          <button class="chip" data-preset="600">600</button>
-          <button class="chip" data-preset="1000">1000</button>
-          <button class="chip" data-preset="1400">1400</button>
-          <button class="chip" data-preset="1800">1800</button>
-          <button class="chip" data-preset="2200">2200</button>
-        </div>
-        <div>
-          <div class="lbl">Coach voice <b data-vtag></b></div>
-          <input type="range" class="voice" min="150" max="3000" step="25" value="1200" data-voice>
-        </div>
-        <div class="sep"></div>
-        <div>
-          <div class="lbl">Opening</div>
-          <div class="selwrap"><select data-opening></select></div>
-        </div>
-        <div>
-          <div class="lbl">Auto play</div>
-          <div class="seg">
-            <button data-amode="off">Off</button>
-            <button data-amode="strong">Strong</button>
-            <button class="amber" data-amode="all">Whole game</button>
+        <div class="group">
+          <div>
+            <div class="lbl">Move strength</div>
+            <div class="rrow"><div class="rnum" data-rnum2>1200</div><div class="rtag" data-rtag2>club</div></div>
+            <input type="range" min="150" max="3000" step="25" value="1200" data-range2>
+          </div>
+          <div class="chips">
+            <button class="chip" data-preset="300">300</button>
+            <button class="chip" data-preset="600">600</button>
+            <button class="chip" data-preset="1000">1000</button>
+            <button class="chip" data-preset="1400">1400</button>
+            <button class="chip" data-preset="1800">1800</button>
+            <button class="chip" data-preset="2200">2200</button>
+          </div>
+          <div>
+            <div class="lbl">Coach voice <b data-vtag></b></div>
+            <input type="range" class="voice" min="150" max="3000" step="25" value="1200" data-voice>
           </div>
         </div>
-        <div class="row"><span>Take every win</span><button class="sw amber on" data-punish></button></div>
-        <div class="row"><span>Playing as</span>
-          <div class="step">
-            <button class="chip" data-color="auto">Auto</button>
-            <button class="chip" data-color="w">White</button>
-            <button class="chip" data-color="b">Black</button>
+        <div class="group">
+          <div class="group-title">Opening and play</div>
+          <div>
+            <div class="lbl">Opening</div>
+            <div class="selwrap"><select data-opening></select></div>
+          </div>
+          <div>
+            <div class="lbl">Auto play</div>
+            <div class="seg">
+              <button data-amode="off">Off</button>
+              <button data-amode="strong">Strong</button>
+              <button class="amber" data-amode="all">Whole game</button>
+            </div>
+          </div>
+          <div class="row"><span>Take every win</span><button class="sw amber on" data-punish></button></div>
+          <div class="row"><span>Playing as</span>
+            <div class="step">
+              <button class="chip" data-color="auto">Auto</button>
+              <button class="chip" data-color="w">White</button>
+              <button class="chip" data-color="b">Black</button>
+            </div>
+          </div>
+          <div class="row"><span>Depth</span>
+            <div class="step">
+              <button class="sbtn" data-dminus>&#8211;</button>
+              <div class="sval" data-dval>Auto</div>
+              <button class="sbtn" data-dplus>+</button>
+            </div>
           </div>
         </div>
-        <div class="row"><span>Depth</span>
-          <div class="step">
-            <button class="sbtn" data-dminus>&#8211;</button>
-            <div class="sval" data-dval>Auto</div>
-            <button class="sbtn" data-dplus>+</button>
+        <div class="group">
+          <div class="group-title">Coach options</div>
+          <div class="grid2">
+            <div class="row"><span>Arrow</span><button class="sw on" data-auto></button></div>
+            <div class="row"><span>Both sides</span><button class="sw on" data-both></button></div>
+            <div class="row"><span>Rate moves</span><button class="sw on" data-rate></button></div>
+            <div class="row"><span>Reasoning</span><button class="sw on" data-reason></button></div>
+            <div class="row"><span>Sac flair</span><button class="sw on" data-sac></button></div>
+            <div class="row"><span>Deep scan</span><button class="sw" data-deep></button></div>
+            <div class="row"><span>Evaluation</span><button class="sw on" data-eval></button></div>
+            <div class="row"><span>Auto power</span><button class="sw on" data-power></button></div>
+            <div class="row"><span>Keep awake</span><button class="sw on" data-awake></button></div>
           </div>
-        </div>
-        <div class="sep"></div>
-        <div class="grid2">
-          <div class="row"><span>Arrow</span><button class="sw on" data-auto></button></div>
-          <div class="row"><span>Both sides</span><button class="sw on" data-both></button></div>
-          <div class="row"><span>Rate moves</span><button class="sw on" data-rate></button></div>
-          <div class="row"><span>Reasoning</span><button class="sw on" data-reason></button></div>
-          <div class="row"><span>Sac flair</span><button class="sw on" data-sac></button></div>
-          <div class="row"><span>Deep scan</span><button class="sw" data-deep></button></div>
-          <div class="row"><span>Evaluation</span><button class="sw on" data-eval></button></div>
-          <div class="row"><span>Auto power</span><button class="sw on" data-power></button></div>
-          <div class="row"><span>Keep awake</span><button class="sw on" data-awake></button></div>
         </div>
         <button class="go" data-now>Analyse now</button>
         <button class="go alt hide" data-now2>Play it now</button>
