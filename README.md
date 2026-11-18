@@ -1,0 +1,1 @@
+so it is a extension and youturn on developer mode on chrome://extensions and you load unpacked and just upload the file and try it on chess.com and comment down and I can change some stuff its just v1.025 right now
