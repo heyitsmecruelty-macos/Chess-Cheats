@@ -1,4 +1,4 @@
-/* Venice Chess Coach 2.6.2 - local Stockfish engine. SPDX-License-Identifier: GPL-3.0-or-later */
+/* Venice Chess Coach 2.6.3 - local Stockfish engine. SPDX-License-Identifier: GPL-3.0-or-later */
 (function () {
   'use strict';
   if (window.__VCC && window.__VCC.started) return;
@@ -2209,21 +2209,37 @@
     const generation = ++engineGeneration;
     try {
       const jsUrl = chrome.runtime.getURL('stockfish-19-lite-single.js');
-      const readAsset = url => fetch(url).then(response => {
+      const readAsset = (url, binary) => fetch(url).then(response => {
         if (!response.ok) throw new Error('HTTP ' + response.status + ' loading ' + url);
-        return response.text();
+        return binary ? response.arrayBuffer() : response.text();
       });
-      Promise.all([readAsset(chrome.runtime.getURL('stockfish-worker.js')), readAsset(jsUrl)]).then(files => {
+      Promise.all([
+        readAsset(chrome.runtime.getURL('stockfish-worker.js')),
+        readAsset(jsUrl),
+        readAsset(chrome.runtime.getURL('stockfish.wasm'), true)
+      ]).then(files => {
         if (generation !== engineGeneration) return;
         const engineSource = files[1].split('self.location.href').join(JSON.stringify(jsUrl));
         if (engineSource === files[1] || engineSource.indexOf('"stockfish.wasm"') < 0) {
           throw new Error('Could not configure Stockfish WebAssembly path.');
         }
-        const workerSource = engineSource + '\n' + files[0];
-        const url = URL.createObjectURL(new Blob([workerSource], { type: 'application/javascript' }));
-        let created;
-        try { created = new Worker(url); }
-        catch (error) { URL.revokeObjectURL(url); throw error; }
+        // A Blob worker cannot fetch the extension-origin WASM asset directly.
+        const wasmBytes = new Uint8Array(files[2]), chunks = [];
+        for (let i = 0; i < wasmBytes.length; i += 0x8000) {
+          chunks.push(String.fromCharCode.apply(null, wasmBytes.subarray(i, i + 0x8000)));
+        }
+        const wasmBase64 = btoa(chunks.join(''));
+        let url = null, created;
+        try {
+          const wasmFetchShim = '(function(){var b=atob(' + JSON.stringify(wasmBase64) +
+            '),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++)a[i]=b.charCodeAt(i);' +
+            'self.fetch=function(){return Promise.resolve(new Response(a.buffer.slice(0),{headers:{"Content-Type":"application/wasm"}}));};})();\n';
+          url = URL.createObjectURL(new Blob([wasmFetchShim, engineSource, '\n', files[0]], { type: 'application/javascript' }));
+          created = new Worker(url);
+        } catch (error) {
+          if (url) URL.revokeObjectURL(url);
+          throw error;
+        }
         workerUrl = url;
         worker = created;
         engineLoading = false;

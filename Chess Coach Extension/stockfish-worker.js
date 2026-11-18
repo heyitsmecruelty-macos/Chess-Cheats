@@ -127,9 +127,9 @@ function finishSearch(line) {
   }
 }
 
-function onEngineLine(value) {
-  const line = String(value || '').trim();
+function handleEngineLine(line) {
   if (line === 'uciok') {
+    if (protocolReady) return;
     protocolReady = true;
     sendEngineCommand('setoption name Threads value 1');
     sendEngineCommand('isready');
@@ -156,6 +156,19 @@ function onEngineLine(value) {
     return;
   }
   if (line.indexOf('bestmove ') === 0) finishSearch(line);
+}
+
+function onEngineLine(value) {
+  const text = String(value || '');
+  const starts = [];
+  // Stockfish.js batches several UCI lines into one postMessage.
+  const marker = /(?:uciok|readyok|info |bestmove )/g;
+  let match;
+  while ((match = marker.exec(text))) starts.push(match.index);
+  for (let i = 0; i < starts.length; i++) {
+    const line = text.slice(starts[i], starts[i + 1] == null ? text.length : starts[i + 1]).trim();
+    if (line) handleEngineLine(line);
+  }
 }
 
 function submit(request) {
